@@ -130,7 +130,9 @@ def clear_files():
 
 
 def chat(message, history):
-    # history is a list of messages; we only use the latest question
+    # The text box can send a dict like {"text": "...", "files": []}
+    if isinstance(message, dict):
+        message = message.get("text", "")
     return answer_question(message)
 
 
@@ -194,12 +196,8 @@ with gr.Blocks(title="Document Q&A Bot") as demo:
             gr.Markdown("### 💬 Ask Questions")
             gr.ChatInterface(
                 fn=chat,
-                chatbot=gr.Chatbot(height=460, placeholder="Upload files, then ask me anything about them 👋"),
-                examples=[
-                    "Summarize the documents",
-                    "What are the key points?",
-                    "List any important dates or numbers",
-                ],
+                textbox=gr.MultimodalTextbox(placeholder="Ask anything about your documents...", file_count="none", sources=[]),
+                chatbot=gr.Chatbot(height=460, placeholder="🔍 I'll browse through your documents to find the answer. Upload files, then ask away."),
             )
 
     upload_button.click(upload_and_show, inputs=[file_input], outputs=[upload_output, files_panel])
