@@ -1,29 +1,28 @@
-import groq
 import os
+from groq import Groq
 
-# Function to call Groq API
+# Model name can be changed with a Space variable called GROQ_MODEL
+# (Groq retired llama-3.1-70b-versatile, so we use a current model)
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+
 def call_grok_api(prompt):
-    # Retrieve the API key from Hugging Face secrets
-    api_key = os.getenv('GROQ_API_KEY')
+    # Get the API key from Hugging Face Space secrets
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is missing. Add it in the Space settings.")
 
-    # Ensure the API key exists
-    if api_key is None:
-        raise ValueError("API key is missing. Please set the GROQ_API_KEY.")
+    client = Groq(api_key=api_key)
+    model = os.getenv("GROQ_MODEL", DEFAULT_MODEL)
 
-    # Initialize Groq Client
-    client = groq.Client(api_key=api_key)
-
-    # Define the message for the conversation
     messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": prompt}
+        {
+            "role": "system",
+            "content": "You answer questions using only the document text given to you. "
+                       "If the answer is not in the text, say you could not find it.",
+        },
+        {"role": "user", "content": prompt},
     ]
-    #model = "gemma-7b-it"  # Model to use for generating responses
-    model = "llama-3.1-70b-versatile"
 
-    # Try to generate a response from the model
-    try:
-        response = client.chat.completions.create(messages=messages, model=model)
-        return response.choices[0].message.content  # Return only the assistant's message
-    except Exception as e:
-        raise Exception(f"Grok API call failed: {str(e)}")
+    response = client.chat.completions.create(messages=messages, model=model)
+    return response.choices[0].message.content

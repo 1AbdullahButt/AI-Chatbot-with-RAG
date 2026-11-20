@@ -1,38 +1,44 @@
-import fitz  # PyMuPDF for PDFs
-import docx  # python-docx for DOCX
+import csv
+import pymupdf  # PyMuPDF for PDFs
+import docx  # python-docx for Word files
 import openpyxl  # openpyxl for Excel files
-import csv  # CSV parsing
-from pptx import Presentation  # python-pptx for PPTX
+from pptx import Presentation  # python-pptx for PowerPoint files
 
-# Function to parse different file types
+
 def parse_file(file_path):
-    if file_path.endswith(".pdf"):
+    path = file_path.lower()
+    if path.endswith(".pdf"):
         return parse_pdf(file_path)
-    elif file_path.endswith(".docx"):
+    elif path.endswith(".docx"):
         return parse_docx(file_path)
-    elif file_path.endswith(".pptx"):
+    elif path.endswith(".pptx"):
         return parse_pptx(file_path)
-    elif file_path.endswith(".xlsx"):
+    elif path.endswith(".xlsx"):
         return parse_xlsx(file_path)
-    elif file_path.endswith(".csv"):
+    elif path.endswith(".csv"):
         return parse_csv(file_path)
     else:
         raise ValueError(f"Unsupported file type: {file_path}")
 
-# Function to parse PDF files
+
 def parse_pdf(file_path):
-    doc = fitz.open(file_path)
+    doc = pymupdf.open(file_path)
     text = ""
     for page in doc:
-        text += page.get_text()
+        text += page.get_text() + "\n"
     return text
 
-# Function to parse DOCX files
+
 def parse_docx(file_path):
     doc = docx.Document(file_path)
-    return "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    lines = [p.text for p in doc.paragraphs]
+    # Also read text inside tables
+    for table in doc.tables:
+        for row in table.rows:
+            lines.append(" | ".join(cell.text for cell in row.cells))
+    return "\n".join(lines)
 
-# Function to parse PPTX files
+
 def parse_pptx(file_path):
     prs = Presentation(file_path)
     text = ""
@@ -42,20 +48,21 @@ def parse_pptx(file_path):
                 text += shape.text + "\n"
     return text
 
-# Function to parse XLSX files
+
 def parse_xlsx(file_path):
-    wb = openpyxl.load_workbook(file_path)
-    sheet = wb.active
+    wb = openpyxl.load_workbook(file_path, data_only=True)
     text = ""
-    for row in sheet.iter_rows(values_only=True):
-        text += "\t".join([str(cell) if cell else "" for cell in row]) + "\n"
+    # Read every sheet, not just the first one
+    for sheet in wb.worksheets:
+        text += f"Sheet: {sheet.title}\n"
+        for row in sheet.iter_rows(values_only=True):
+            text += "\t".join("" if cell is None else str(cell) for cell in row) + "\n"
     return text
 
-# Function to parse CSV files
+
 def parse_csv(file_path):
     text = ""
-    with open(file_path, newline='', encoding='utf-8') as csvfile:
-        reader = csv.reader(csvfile)
-        for row in reader:
+    with open(file_path, newline="", encoding="utf-8", errors="ignore") as f:
+        for row in csv.reader(f):
             text += ",".join(row) + "\n"
     return text

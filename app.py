@@ -1,137 +1,137 @@
-import gradio as gr
 import os
 import re
-from typing import List
+import gradio as gr
 from llm_integration import call_grok_api
 from document_parser import parse_file
 
-# In-memory storage for parsed content
+# Parsed documents are kept in memory: {file name: full text}
 parsed_file_content = {}
 
-# Function to extract important keywords from the question
-def extract_keywords(prompt):
-    """Extract important keywords from the user's question"""
-    stopwords = ["what", "is", "the", "of", "a", "an", "in", "on", "at", "by", "for"]
-    
-    # Split the prompt into words and remove stopwords
-    keywords = [word for word in re.findall(r'\b\w+\b', prompt.lower()) if word not in stopwords]
-    
-    return keywords
+# Settings for splitting documents into chunks
+CHUNK_SIZE = 1000      # characters per chunk
+CHUNK_OVERLAP = 200    # characters shared between neighbouring chunks
+TOP_CHUNKS = 5         # how many chunks we send to the model
 
-# Enhanced function to find the most relevant document based on keyword matching
-def find_most_relevant_file(prompt):
-    """Find the most relevant document based on keyword matching"""
-    # Extract keywords from the prompt
-    keywords = extract_keywords(prompt)
+STOPWORDS = {
+    "what", "is", "the", "of", "a", "an", "in", "on", "at", "by", "for",
+    "and", "to", "are", "was", "how", "who", "when", "where", "why", "me",
+    "tell", "about", "does", "do", "this", "that", "with", "from",
+}
 
-    best_match = None
-    highest_keyword_count = 0
-    
-    # Search through the documents for keyword matches
+
+def get_keywords(text):
+    # Lowercase words without stopwords
+    words = re.findall(r"\w+", text.lower())
+    return [w for w in words if w not in STOPWORDS]
+
+
+def split_into_chunks(text):
+    # Cut the text into overlapping pieces
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunks.append(text[start:start + CHUNK_SIZE])
+        start += CHUNK_SIZE - CHUNK_OVERLAP
+    return chunks
+
+
+def find_best_chunks(question):
+    # Score every chunk by how many question keywords it contains
+    keywords = get_keywords(question)
+    scored = []
     for filename, content in parsed_file_content.items():
-        # Count how many keywords appear in the document content
-        keyword_count = sum(1 for keyword in keywords if keyword in content.lower())
+        for chunk in split_into_chunks(content):
+            chunk_lower = chunk.lower()
+            score = sum(chunk_lower.count(k) for k in keywords)
+            if score > 0:
+                scored.append((score, filename, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[:TOP_CHUNKS]
 
-        # If this document has more matching keywords, it's a better match
-        if keyword_count > highest_keyword_count:
-            highest_keyword_count = keyword_count
-            best_match = filename
-    
-    return best_match
 
-# Function to check if the user is asking for a summary
-def is_summary_request(prompt):
-    """Check if the user is asking for a summary"""
-    return any(keyword in prompt.lower() for keyword in ["summarize", "summary", "summaries"])
+def is_summary_request(question):
+    return any(w in question.lower() for w in ["summarize", "summary", "summarise", "summaries"])
 
-# Gradio function to ask a question
-def ask_question(prompt: str):
-    """Process a question or a summary request"""
-    # Check if the prompt is asking for a summary
-    if is_summary_request(prompt):
-        return summarize_all_documents()
-    
-    # Find the most relevant file based on the question
-    most_relevant_file = find_most_relevant_file(prompt)
-    
-    if not most_relevant_file:
-        return "No relevant file found."
-    
-    # Append file content to the prompt
-    extended_prompt = f"Here is the content of the file: {parsed_file_content[most_relevant_file]}. Now, {prompt}"
-    
-    try:
-        # Call Groq API with the extended prompt
-        response = call_grok_api(extended_prompt)
-        return response
-    except Exception as e:
-        return f"Error: {str(e)}"
 
-# Function to summarize all uploaded documents
 def summarize_all_documents():
-    """Summarize each document in the parsed file content with proper formatting"""
     summaries = []
-    
     for filename, content in parsed_file_content.items():
-        summary_prompt = f"Summarize the following content: {content}"
+        # Only send the first part so very large files do not break the request
+        short_content = content[:12000]
         try:
-            # Call Groq API to summarize the content
-            summary = call_grok_api(summary_prompt)
+            summary = call_grok_api(f"Summarize the following document:\n\n{short_content}")
             summaries.append(f"**Summary of {filename}:**\n\n{summary}")
         except Exception as e:
-            summaries.append(f"Error summarizing {filename}: {str(e)}")
-    
+            summaries.append(f"Error summarizing {filename}: {e}")
     return "\n\n".join(summaries)
 
-# File upload handler
-def upload_files(files: List):
-    if files is None or len(files) == 0:
+
+def answer_question(question):
+    if not parsed_file_content:
+        return "Please upload and parse some files first."
+
+    if is_summary_request(question):
+        return summarize_all_documents()
+
+    best = find_best_chunks(question)
+    if not best:
+        return "I could not find anything relevant in the uploaded files."
+
+    context = "\n\n".join(f"[From {name}]\n{chunk}" for _, name, chunk in best)
+    prompt = f"Document excerpts:\n{context}\n\nQuestion: {question}"
+
+    try:
+        answer = call_grok_api(prompt)
+    except Exception as e:
+        return f"Error: {e}"
+
+    sources = sorted({name for _, name, _ in best})
+    return f"{answer}\n\n*Sources: {', '.join(sources)}*"
+
+
+def upload_files(files):
+    if not files:
         return "No files were uploaded."
 
-    # Clear old parsed content when new files are uploaded
     parsed_file_content.clear()
-
-    uploaded_files = []
+    messages = []
 
     for file in files:
-        # Extract the original file name from the temporary file path
-        original_file_name = os.path.basename(file.name)
-        
-        # Parse the file from the temporary location
+        # Gradio can give a path string or a file object, handle both
+        path = file if isinstance(file, str) else file.name
+        name = os.path.basename(path)
         try:
-            file_content = parse_file(file.name)
-
-            # Store parsed content in memory
-            parsed_file_content[original_file_name.lower()] = file_content
-            uploaded_files.append(f"File '{original_file_name}' uploaded and parsed successfully!")
+            parsed_file_content[name] = parse_file(path)
+            messages.append(f"'{name}' uploaded and parsed successfully!")
         except Exception as e:
-            uploaded_files.append(f"Error uploading '{original_file_name}': {str(e)}")
+            messages.append(f"Error with '{name}': {e}")
 
-    return "\n".join(uploaded_files)
+    return "\n".join(messages)
 
-# Gradio UI with enhanced design and layout
-with gr.Blocks(css=".gradio-container {background-color: #f9f9f9; font-family: Arial;} .gr-box {border-radius: 10px;}") as demo:
-    gr.Markdown("""
-    <div style="text-align: center;">
-        <h1 style="color: #1e88e5;">📄 File Upload & Q&A Bot</h1>
-        <p>Upload files and ask questions based on their content</p>
-    </div>
-    """)
-    
-    with gr.Tab("Upload Files"):
-        with gr.Row():
-            file_input = gr.Files(file_types=[".pdf", ".docx", ".pptx", ".xlsx", ".csv"], label="Upload Files", interactive=True)
-            upload_button = gr.Button("Upload and Parse Files")
-        upload_output = gr.Textbox(label="Upload Status", placeholder="Uploaded files will be displayed here.")
+
+def chat(message, history):
+    # history is a list of messages; we only use the latest question
+    return answer_question(message)
+
+
+with gr.Blocks(title="Document Q&A Bot") as demo:
+    gr.Markdown("# 📄 Document Q&A Bot\nUpload files, then ask questions about them.")
+
+    with gr.Tab("1. Upload Files"):
+        file_input = gr.File(
+            file_count="multiple",
+            file_types=[".pdf", ".docx", ".pptx", ".xlsx", ".csv"],
+            label="Upload Files",
+        )
+        upload_button = gr.Button("Upload and Parse Files")
+        upload_output = gr.Textbox(label="Upload Status")
         upload_button.click(upload_files, inputs=[file_input], outputs=[upload_output])
 
-    with gr.Tab("Ask a Question"):
-        with gr.Row():
-            question_input = gr.Textbox(label="Ask a question based on uploaded files", placeholder="Type your question here...")
-            question_button = gr.Button("Submit")
-        answer_output = gr.Markdown(label="Answer")
-        question_button.click(ask_question, inputs=[question_input], outputs=[answer_output])
+    with gr.Tab("2. Ask Questions"):
+        gr.ChatInterface(
+            fn=chat,
+            examples=["Summarize the documents", "What are the key points?"],
+        )
 
-# Launch Gradio app
 if __name__ == "__main__":
-    demo.launch(share=True)
+    demo.launch()

@@ -1,3 +1,17 @@
+# AI Document Q&A Bot (RAG)
+
+Upload PDF, Word, PowerPoint, Excel or CSV files and ask questions about them.
+Files are split into small chunks, the chunks that best match your question are
+found, and only those are sent to a Groq-hosted LLM to write the answer.
+
+## Setup
+1. `pip install -r requirements.txt`
+2. Set the environment variable `GROQ_API_KEY` (on Hugging Face: a Space secret).
+3. Optional: set `GROQ_MODEL` to change the model (default `openai/gpt-oss-120b`).
+4. Run `python app.py`
+
+---
+
 # Project Report: AI-Driven Document Q&A Bot using Gradio and Groq API
 
 ## 1. Project Overview
