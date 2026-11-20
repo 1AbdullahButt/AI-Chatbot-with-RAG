@@ -109,29 +109,97 @@ def upload_files(files):
     return "\n".join(messages)
 
 
+def file_chips():
+    # Small HTML list that shows which files are loaded
+    if not parsed_file_content:
+        return "<div class='empty'>No files loaded yet</div>"
+    html = ""
+    for name, text in parsed_file_content.items():
+        html += f"<div class='chip'>📎 <b>{name}</b><span>{len(text):,} chars</span></div>"
+    return html
+
+
+def upload_and_show(files):
+    status = upload_files(files)
+    return status, file_chips()
+
+
+def clear_files():
+    parsed_file_content.clear()
+    return None, "Files cleared.", file_chips()
+
+
 def chat(message, history):
     # history is a list of messages; we only use the latest question
     return answer_question(message)
 
 
+CSS = """
+.gradio-container {max-width: 1200px !important; margin: auto;}
+#hero {text-align: center; padding: 28px 10px 8px 10px;}
+#hero h1 {font-size: 2.4rem; margin: 0;
+  background: linear-gradient(90deg, #7c3aed, #06b6d4);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;}
+#hero p {opacity: 0.75; margin-top: 6px;}
+.card {border: 1px solid rgba(124, 58, 237, 0.35); border-radius: 16px;
+  padding: 14px; background: rgba(124, 58, 237, 0.06);}
+.chip {display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; margin: 6px 0; border-radius: 10px;
+  background: rgba(6, 182, 212, 0.12); border: 1px solid rgba(6, 182, 212, 0.35);
+  font-size: 0.9rem;}
+.chip b {text-align: left; flex: 1; margin-left: 6px;}
+.chip span {opacity: 0.65; font-size: 0.78rem;}
+.empty {opacity: 0.55; padding: 8px 4px; font-size: 0.9rem;}
+#steps {font-size: 0.88rem; opacity: 0.8; line-height: 1.7;}
+button.primary {background: linear-gradient(90deg, #7c3aed, #06b6d4) !important;
+  border: none !important; color: white !important;}
+footer {display: none !important;}
+"""
+
+THEME = gr.themes.Soft(primary_hue="violet", secondary_hue="cyan", neutral_hue="slate")
+
 with gr.Blocks(title="Document Q&A Bot") as demo:
-    gr.Markdown("# 📄 Document Q&A Bot\nUpload files, then ask questions about them.")
+    gr.HTML(
+        "<div id='hero'><h1>📄 DocChat AI</h1>"
+        "<p>Upload your documents and chat with them. Powered by RAG + Groq.</p></div>"
+    )
 
-    with gr.Tab("1. Upload Files"):
-        file_input = gr.File(
-            file_count="multiple",
-            file_types=[".pdf", ".docx", ".pptx", ".xlsx", ".csv"],
-            label="Upload Files",
-        )
-        upload_button = gr.Button("Upload and Parse Files")
-        upload_output = gr.Textbox(label="Upload Status")
-        upload_button.click(upload_files, inputs=[file_input], outputs=[upload_output])
+    with gr.Row(equal_height=False):
+        # Left panel: upload
+        with gr.Column(scale=4, elem_classes="card"):
+            gr.Markdown("### 📁 Your Documents")
+            file_input = gr.File(
+                file_count="multiple",
+                file_types=[".pdf", ".docx", ".pptx", ".xlsx", ".csv"],
+                label="Drop PDF, Word, PowerPoint, Excel or CSV files",
+            )
+            with gr.Row():
+                upload_button = gr.Button("⚡ Parse Files", variant="primary")
+                clear_button = gr.Button("🗑️ Clear")
+            upload_output = gr.Textbox(label="Status", interactive=False, lines=2)
+            gr.Markdown("#### Loaded files")
+            files_panel = gr.HTML(file_chips())
+            gr.Markdown(
+                "**How it works**<br>1. Upload files<br>2. Click Parse Files<br>"
+                "3. Ask anything on the right",
+                elem_id="steps",
+            )
 
-    with gr.Tab("2. Ask Questions"):
-        gr.ChatInterface(
-            fn=chat,
-            examples=["Summarize the documents", "What are the key points?"],
-        )
+        # Right panel: chat
+        with gr.Column(scale=7, elem_classes="card"):
+            gr.Markdown("### 💬 Ask Questions")
+            gr.ChatInterface(
+                fn=chat,
+                chatbot=gr.Chatbot(height=460, placeholder="Upload files, then ask me anything about them 👋"),
+                examples=[
+                    "Summarize the documents",
+                    "What are the key points?",
+                    "List any important dates or numbers",
+                ],
+            )
+
+    upload_button.click(upload_and_show, inputs=[file_input], outputs=[upload_output, files_panel])
+    clear_button.click(clear_files, outputs=[file_input, upload_output, files_panel])
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(theme=THEME, css=CSS)
