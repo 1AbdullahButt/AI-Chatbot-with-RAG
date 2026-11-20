@@ -135,7 +135,8 @@ def chat(message, history):
 
 
 CSS = """
-.gradio-container {max-width: 1200px !important; margin: auto;}
+.gradio-container {width: 100% !important; max-width: 1200px !important; margin: auto;}
+.gradio-container .main, .gradio-container .fillable {width: 100% !important; max-width: 1200px !important;}
 #hero {text-align: center; padding: 28px 10px 8px 10px;}
 #hero h1 {font-size: 2.4rem; margin: 0;
   background: linear-gradient(90deg, #7c3aed, #06b6d4);
@@ -153,6 +154,9 @@ CSS = """
 #steps {font-size: 0.88rem; opacity: 0.8; line-height: 1.7;}
 button.primary {background: linear-gradient(90deg, #7c3aed, #06b6d4) !important;
   border: none !important; color: white !important;}
+.placeholder, .placeholder-content {display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; width: 100%;}
+.placeholder p {text-align: center; font-size: 1.05rem; opacity: 0.7;}
 footer {display: none !important;}
 """
 
