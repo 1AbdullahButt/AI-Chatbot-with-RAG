@@ -1,16 +1,18 @@
 import os
 import re
+import html
 import gradio as gr
 from llm_integration import call_grok_api
 from document_parser import parse_file
 
-# Parsed documents are kept in memory: {file name: full text}
-parsed_file_content = {}
+# Each visitor gets their own documents ({file name: full text}) stored in
+# gr.State, so people using the app at the same time never see each other's files.
 
 # Settings for splitting documents into chunks
 CHUNK_SIZE = 1000      # characters per chunk
 CHUNK_OVERLAP = 200    # characters shared between neighbouring chunks
 TOP_CHUNKS = 5         # how many chunks we send to the model
+SUMMARY_LIMIT = 12000  # max characters of one file we summarize
 
 STOPWORDS = {
     "what", "is", "the", "of", "a", "an", "in", "on", "at", "by", "for",
@@ -35,11 +37,11 @@ def split_into_chunks(text):
     return chunks
 
 
-def find_best_chunks(question):
+def find_best_chunks(question, docs):
     # Score every chunk by how many question keywords it contains
     keywords = get_keywords(question)
     scored = []
-    for filename, content in parsed_file_content.items():
+    for filename, content in docs.items():
         for chunk in split_into_chunks(content):
             chunk_lower = chunk.lower()
             score = sum(chunk_lower.count(k) for k in keywords)
@@ -49,33 +51,48 @@ def find_best_chunks(question):
     return scored[:TOP_CHUNKS]
 
 
+def first_chunks(docs):
+    # Used for general questions like "what is this about?"
+    # We take the beginning of each document
+    result = []
+    for filename, content in docs.items():
+        result.append((0, filename, content[:CHUNK_SIZE * 2]))
+    return result[:TOP_CHUNKS]
+
+
 def is_summary_request(question):
-    return any(w in question.lower() for w in ["summarize", "summary", "summarise", "summaries"])
+    # Only short questions count, so "does the summary table show Q3?" is a normal question
+    words = question.lower().split()
+    wants_summary = any(w.strip("?.!,") in ["summarize", "summarise", "summary", "summaries"] for w in words)
+    return wants_summary and len(words) <= 8
 
 
-def summarize_all_documents():
+def summarize_all_documents(docs):
     summaries = []
-    for filename, content in parsed_file_content.items():
-        # Only send the first part so very large files do not break the request
-        short_content = content[:12000]
+    for filename, content in docs.items():
+        short_content = content[:SUMMARY_LIMIT]
         try:
             summary = call_grok_api(f"Summarize the following document:\n\n{short_content}")
-            summaries.append(f"**Summary of {filename}:**\n\n{summary}")
+            note = ""
+            if len(content) > SUMMARY_LIMIT:
+                note = f"\n\n*(Based on the first {SUMMARY_LIMIT:,} characters of this file.)*"
+            summaries.append(f"**Summary of {filename}:**\n\n{summary}{note}")
         except Exception as e:
             summaries.append(f"Error summarizing {filename}: {e}")
     return "\n\n".join(summaries)
 
 
-def answer_question(question):
-    if not parsed_file_content:
-        return "Please upload and parse some files first."
+def answer_question(question, docs):
+    if not docs:
+        return "Please upload and parse some files first (left panel)."
 
     if is_summary_request(question):
-        return summarize_all_documents()
+        return summarize_all_documents(docs)
 
-    best = find_best_chunks(question)
+    best = find_best_chunks(question, docs)
     if not best:
-        return "I could not find anything relevant in the uploaded files."
+        # No keyword matched, so use the start of the documents
+        best = first_chunks(docs)
 
     context = "\n\n".join(f"[From {name}]\n{chunk}" for _, name, chunk in best)
     prompt = f"Document excerpts:\n{context}\n\nQuestion: {question}"
@@ -90,50 +107,52 @@ def answer_question(question):
 
 
 def upload_files(files):
+    docs = {}
     if not files:
-        return "No files were uploaded."
+        return docs, "No files were uploaded."
 
-    parsed_file_content.clear()
     messages = []
-
     for file in files:
         # Gradio can give a path string or a file object, handle both
         path = file if isinstance(file, str) else file.name
         name = os.path.basename(path)
         try:
-            parsed_file_content[name] = parse_file(path)
+            text = parse_file(path)
+            if not text.strip():
+                raise ValueError("no readable text found (is it a scanned file?)")
+            docs[name] = text
             messages.append(f"'{name}' uploaded and parsed successfully!")
         except Exception as e:
             messages.append(f"Error with '{name}': {e}")
 
-    return "\n".join(messages)
+    return docs, "\n".join(messages)
 
 
-def file_chips():
+def file_chips(docs):
     # Small HTML list that shows which files are loaded
-    if not parsed_file_content:
+    if not docs:
         return "<div class='empty'>No files loaded yet</div>"
-    html = ""
-    for name, text in parsed_file_content.items():
-        html += f"<div class='chip'>📎 <b>{name}</b><span>{len(text):,} chars</span></div>"
-    return html
+    chips = ""
+    for name, text in docs.items():
+        safe_name = html.escape(name)  # stops file names from injecting HTML
+        chips += f"<div class='chip'>📎 <b>{safe_name}</b><span>{len(text):,} chars</span></div>"
+    return chips
 
 
 def upload_and_show(files):
-    status = upload_files(files)
-    return status, file_chips()
+    docs, status = upload_files(files)
+    return docs, status, file_chips(docs)
 
 
 def clear_files():
-    parsed_file_content.clear()
-    return None, "Files cleared.", file_chips()
+    return {}, None, "Files cleared.", file_chips({})
 
 
-def chat(message, history):
+def chat(message, history, docs):
     # The text box can send a dict like {"text": "...", "files": []}
     if isinstance(message, dict):
         message = message.get("text", "")
-    return answer_question(message)
+    return answer_question(message, docs or {})
 
 
 CSS = """
@@ -165,6 +184,7 @@ footer {display: none !important;}
 THEME = gr.themes.Soft(primary_hue="violet", secondary_hue="cyan", neutral_hue="slate")
 
 with gr.Blocks(title="Document Q&A Bot") as demo:
+    docs_state = gr.State({})  # this visitor's documents
     gr.HTML(
         "<div id='hero'><h1>📄 DocChat AI</h1>"
         "<p>Upload your documents and chat with them. Powered by RAG + Groq.</p></div>"
@@ -184,7 +204,7 @@ with gr.Blocks(title="Document Q&A Bot") as demo:
                 clear_button = gr.Button("🗑️ Clear")
             upload_output = gr.Textbox(label="Status", interactive=False, lines=2)
             gr.Markdown("#### Loaded files")
-            files_panel = gr.HTML(file_chips())
+            files_panel = gr.HTML(file_chips({}))
             gr.Markdown(
                 "**How it works**<br>1. Upload files<br>2. Click Parse Files<br>"
                 "3. Ask anything on the right",
@@ -196,12 +216,13 @@ with gr.Blocks(title="Document Q&A Bot") as demo:
             gr.Markdown("### 💬 Ask Questions")
             gr.ChatInterface(
                 fn=chat,
+                additional_inputs=[docs_state],
                 textbox=gr.MultimodalTextbox(placeholder="Ask anything about your documents...", file_count="none", sources=[]),
                 chatbot=gr.Chatbot(height=460, placeholder="🔍 I'll browse through your documents to find the answer. Upload files, then ask away."),
             )
 
-    upload_button.click(upload_and_show, inputs=[file_input], outputs=[upload_output, files_panel])
-    clear_button.click(clear_files, outputs=[file_input, upload_output, files_panel])
+    upload_button.click(upload_and_show, inputs=[file_input], outputs=[docs_state, upload_output, files_panel])
+    clear_button.click(clear_files, outputs=[docs_state, file_input, upload_output, files_panel])
 
 if __name__ == "__main__":
     demo.launch(theme=THEME, css=CSS)
