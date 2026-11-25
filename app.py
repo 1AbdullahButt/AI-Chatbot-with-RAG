@@ -1,158 +1,89 @@
 import os
-import re
 import html
 import gradio as gr
-from llm_integration import call_grok_api
 from document_parser import parse_file
+from rag_engine import (
+    build_index, answer_question, DEFAULT_TOP_K, DEFAULT_THRESHOLD,
+)
 
-# Each visitor gets their own documents ({file name: full text}) stored in
-# gr.State, so people using the app at the same time never see each other's files.
+# Every visitor gets their own index stored in gr.State, so people using the
+# app at the same time never see each other's documents or conversations.
 
-# Settings for splitting documents into chunks
-CHUNK_SIZE = 1000      # characters per chunk
-CHUNK_OVERLAP = 200    # characters shared between neighbouring chunks
-TOP_CHUNKS = 5         # how many chunks we send to the model
-SUMMARY_LIMIT = 12000  # max characters of one file we summarize
-
-STOPWORDS = {
-    "what", "is", "the", "of", "a", "an", "in", "on", "at", "by", "for",
-    "and", "to", "are", "was", "how", "who", "when", "where", "why", "me",
-    "tell", "about", "does", "do", "this", "that", "with", "from",
-}
+ALL_DOCS = "All documents"
 
 
-def get_keywords(text):
-    # Lowercase words without stopwords
-    words = re.findall(r"\w+", text.lower())
-    return [w for w in words if w not in STOPWORDS]
+def file_chips(index):
+    # Small HTML list that shows which files are loaded
+    if not index:
+        return "<div class='empty'>No files loaded yet</div>"
+    chips = ""
+    for source in index["sources"]:
+        count = sum(1 for c in index["chunks"] if c["source"] == source)
+        safe_name = html.escape(source)  # stops file names from injecting HTML
+        chips += f"<div class='chip'>📎 <b>{safe_name}</b><span>{count} chunks</span></div>"
+    return chips
 
 
-def split_into_chunks(text):
-    # Cut the text into overlapping pieces
-    chunks = []
-    start = 0
-    while start < len(text):
-        chunks.append(text[start:start + CHUNK_SIZE])
-        start += CHUNK_SIZE - CHUNK_OVERLAP
-    return chunks
-
-
-def find_best_chunks(question, docs):
-    # Score every chunk by how many question keywords it contains
-    keywords = get_keywords(question)
-    scored = []
-    for filename, content in docs.items():
-        for chunk in split_into_chunks(content):
-            chunk_lower = chunk.lower()
-            score = sum(chunk_lower.count(k) for k in keywords)
-            if score > 0:
-                scored.append((score, filename, chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return scored[:TOP_CHUNKS]
-
-
-def first_chunks(docs):
-    # Used for general questions like "what is this about?"
-    # We take the beginning of each document
-    result = []
-    for filename, content in docs.items():
-        result.append((0, filename, content[:CHUNK_SIZE * 2]))
-    return result[:TOP_CHUNKS]
-
-
-def is_summary_request(question):
-    # Only short questions count, so "does the summary table show Q3?" is a normal question
-    words = question.lower().split()
-    wants_summary = any(w.strip("?.!,") in ["summarize", "summarise", "summary", "summaries"] for w in words)
-    return wants_summary and len(words) <= 8
-
-
-def summarize_all_documents(docs):
-    summaries = []
-    for filename, content in docs.items():
-        short_content = content[:SUMMARY_LIMIT]
-        try:
-            summary = call_grok_api(f"Summarize the following document:\n\n{short_content}")
-            note = ""
-            if len(content) > SUMMARY_LIMIT:
-                note = f"\n\n*(Based on the first {SUMMARY_LIMIT:,} characters of this file.)*"
-            summaries.append(f"**Summary of {filename}:**\n\n{summary}{note}")
-        except Exception as e:
-            summaries.append(f"Error summarizing {filename}: {e}")
-    return "\n\n".join(summaries)
-
-
-def answer_question(question, docs):
-    if not docs:
-        return "Please upload and parse some files first (left panel)."
-
-    if is_summary_request(question):
-        return summarize_all_documents(docs)
-
-    best = find_best_chunks(question, docs)
-    if not best:
-        # No keyword matched, so use the start of the documents
-        best = first_chunks(docs)
-
-    context = "\n\n".join(f"[From {name}]\n{chunk}" for _, name, chunk in best)
-    prompt = f"Document excerpts:\n{context}\n\nQuestion: {question}"
-
-    try:
-        answer = call_grok_api(prompt)
-    except Exception as e:
-        return f"Error: {e}"
-
-    sources = sorted({name for _, name, _ in best})
-    return f"{answer}\n\n*Sources: {', '.join(sources)}*"
-
-
-def upload_files(files):
-    docs = {}
+def upload_and_index(files):
     if not files:
-        return docs, "No files were uploaded."
+        return None, "No files were uploaded.", file_chips(None), gr.Dropdown(choices=[ALL_DOCS], value=ALL_DOCS)
 
+    docs = {}
     messages = []
     for file in files:
         # Gradio can give a path string or a file object, handle both
         path = file if isinstance(file, str) else file.name
         name = os.path.basename(path)
         try:
-            text = parse_file(path)
-            if not text.strip():
+            pages = parse_file(path)
+            pages = [p for p in pages if p["text"].strip()]
+            if not pages:
                 raise ValueError("no readable text found (is it a scanned file?)")
-            docs[name] = text
-            messages.append(f"'{name}' uploaded and parsed successfully!")
+            docs[name] = pages
+            messages.append(f"'{name}' parsed successfully!")
         except Exception as e:
             messages.append(f"Error with '{name}': {e}")
 
-    return docs, "\n".join(messages)
-
-
-def file_chips(docs):
-    # Small HTML list that shows which files are loaded
-    if not docs:
-        return "<div class='empty'>No files loaded yet</div>"
-    chips = ""
-    for name, text in docs.items():
-        safe_name = html.escape(name)  # stops file names from injecting HTML
-        chips += f"<div class='chip'>📎 <b>{safe_name}</b><span>{len(text):,} chars</span></div>"
-    return chips
-
-
-def upload_and_show(files):
-    docs, status = upload_files(files)
-    return docs, status, file_chips(docs)
+    index = build_index(docs) if docs else None
+    choices = [ALL_DOCS] + (index["sources"] if index else [])
+    return index, "\n".join(messages), file_chips(index), gr.Dropdown(choices=choices, value=ALL_DOCS)
 
 
 def clear_files():
-    return {}, None, "Files cleared.", file_chips({})
+    return None, None, "Files cleared.", file_chips(None), gr.Dropdown(choices=[ALL_DOCS], value=ALL_DOCS)
 
 
-def chat(message, history, docs):
-    # The text box can send a dict like {"text": "...", "files": []}
-    if isinstance(message, dict):
-        message = message.get("text", "")
-    return answer_question(message, docs or {})
+def ask(message, chat, index, top_k, threshold, source):
+    chat = chat or []
+    answer, diagnostics = answer_question(message, chat, index, int(top_k), threshold, source)
+    chat = chat + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": answer},
+    ]
+    return "", chat, diagnostics
+
+
+def clear_chat():
+    return [], ""
+
+
+def run_evaluation(tests_text, index, top_k, threshold, source):
+    # Each line looks like:  question | keyword1, keyword2
+    rows, passed, total = [], 0, 0
+    for line in (tests_text or "").splitlines():
+        if "|" not in line:
+            continue
+        question, keywords = line.split("|", 1)
+        expected = [k.strip().lower() for k in keywords.split(",") if k.strip()]
+        answer, _ = answer_question(question, [], index, int(top_k), threshold, source)
+        ok = bool(expected) and all(k in answer.lower() for k in expected)
+        total += 1
+        passed += ok
+        rows.append(f"| {question.strip()} | {', '.join(expected)} | {'✅ pass' if ok else '❌ fail'} |")
+    if not total:
+        return "Add test lines like: `How many leave days? | 25`"
+    table = "| Question | Expected keywords | Result |\n|---|---|---|\n" + "\n".join(rows)
+    return f"**Passed {passed} of {total} ({passed / total:.0%})**\n\n{table}"
 
 
 CSS = """
@@ -184,45 +115,75 @@ footer {display: none !important;}
 THEME = gr.themes.Soft(primary_hue="violet", secondary_hue="cyan", neutral_hue="slate")
 
 with gr.Blocks(title="Document Q&A Bot") as demo:
-    docs_state = gr.State({})  # this visitor's documents
+    index_state = gr.State(None)  # this visitor's search index
+
     gr.HTML(
         "<div id='hero'><h1>📄 DocChat AI</h1>"
-        "<p>Upload your documents and chat with them. Powered by RAG + Groq.</p></div>"
+        "<p>Upload your documents and chat with them. Hybrid search (meaning + keywords) powered by Groq.</p></div>"
     )
 
     with gr.Row(equal_height=False):
-        # Left panel: upload
+        # Left panel: documents and settings
         with gr.Column(scale=4, elem_classes="card"):
             gr.Markdown("### 📁 Your Documents")
             file_input = gr.File(
                 file_count="multiple",
-                file_types=[".pdf", ".docx", ".pptx", ".xlsx", ".csv"],
-                label="Drop PDF, Word, PowerPoint, Excel or CSV files",
+                file_types=[".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt"],
+                label="Drop PDF, Word, PowerPoint, Excel, CSV or TXT files",
             )
             with gr.Row():
                 upload_button = gr.Button("⚡ Parse Files", variant="primary")
-                clear_button = gr.Button("🗑️ Clear")
+                clear_files_button = gr.Button("🗑️ Clear")
             upload_output = gr.Textbox(label="Status", interactive=False, lines=2)
             gr.Markdown("#### Loaded files")
-            files_panel = gr.HTML(file_chips({}))
-            gr.Markdown(
-                "**How it works**<br>1. Upload files<br>2. Click Parse Files<br>"
-                "3. Ask anything on the right",
-                elem_id="steps",
-            )
+            files_panel = gr.HTML(file_chips(None))
 
-        # Right panel: chat
+            with gr.Accordion("⚙️ Search settings", open=False):
+                source_dropdown = gr.Dropdown(choices=[ALL_DOCS], value=ALL_DOCS, label="Search in")
+                top_k_slider = gr.Slider(1, 10, value=DEFAULT_TOP_K, step=1, label="Chunks to use (top-k)")
+                threshold_slider = gr.Slider(
+                    0.0, 1.0, value=DEFAULT_THRESHOLD, step=0.01,
+                    label="Similarity threshold (higher = stricter)",
+                )
+
+        # Right panel: chat and evaluation
         with gr.Column(scale=7, elem_classes="card"):
-            gr.Markdown("### 💬 Ask Questions")
-            gr.ChatInterface(
-                fn=chat,
-                additional_inputs=[docs_state],
-                textbox=gr.MultimodalTextbox(placeholder="Ask anything about your documents...", file_count="none", sources=[]),
-                chatbot=gr.Chatbot(height=460, placeholder="🔍 I'll browse through your documents to find the answer. Upload files, then ask away."),
-            )
+            with gr.Tab("💬 Chat"):
+                chatbot = gr.Chatbot(
+                    height=430,
+                    placeholder="🔍 I'll browse through your documents to find the answer. Upload files, then ask away.",
+                )
+                with gr.Row():
+                    question_box = gr.Textbox(
+                        placeholder="Ask anything about your documents...",
+                        show_label=False, container=False, scale=8,
+                    )
+                    send_button = gr.Button("Send", variant="primary", scale=1)
+                new_chat_button = gr.Button("🔄 New conversation")
+                with gr.Accordion("📊 Diagnostics (last answer)", open=False):
+                    diagnostics = gr.Markdown("Ask a question to see latency, tokens and the chunks used.")
 
-    upload_button.click(upload_and_show, inputs=[file_input], outputs=[docs_state, upload_output, files_panel])
-    clear_button.click(clear_files, outputs=[docs_state, file_input, upload_output, files_panel])
+            with gr.Tab("🧪 Evaluation"):
+                gr.Markdown(
+                    "Check the bot with your own test questions. One per line: "
+                    "`question | expected keywords (comma separated)`"
+                )
+                eval_input = gr.Textbox(lines=5, show_label=False,
+                                        placeholder="How many leave days do employees get? | 25")
+                eval_button = gr.Button("Run tests", variant="primary")
+                eval_output = gr.Markdown()
+
+    settings = [top_k_slider, threshold_slider, source_dropdown]
+    upload_button.click(upload_and_index, inputs=[file_input],
+                        outputs=[index_state, upload_output, files_panel, source_dropdown])
+    clear_files_button.click(clear_files,
+                             outputs=[index_state, file_input, upload_output, files_panel, source_dropdown])
+
+    ask_inputs = [question_box, chatbot, index_state] + settings
+    question_box.submit(ask, inputs=ask_inputs, outputs=[question_box, chatbot, diagnostics])
+    send_button.click(ask, inputs=ask_inputs, outputs=[question_box, chatbot, diagnostics])
+    new_chat_button.click(clear_chat, outputs=[chatbot, diagnostics])
+    eval_button.click(run_evaluation, inputs=[eval_input, index_state] + settings, outputs=[eval_output])
 
 if __name__ == "__main__":
     demo.launch(theme=THEME, css=CSS)

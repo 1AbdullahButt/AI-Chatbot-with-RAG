@@ -6,7 +6,8 @@ from groq import Groq
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 
-def call_grok_api(prompt):
+def chat_completion(messages, temperature=0.2):
+    """Send messages to Groq. Returns (answer_text, total_tokens_used)."""
     # Get the API key from Hugging Face Space secrets
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -15,14 +16,11 @@ def call_grok_api(prompt):
     client = Groq(api_key=api_key)
     model = os.getenv("GROQ_MODEL", DEFAULT_MODEL)
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You answer questions using only the document text given to you. "
-                       "If the answer is not in the text, say you could not find it.",
-        },
-        {"role": "user", "content": prompt},
-    ]
-
-    response = client.chat.completions.create(messages=messages, model=model)
-    return response.choices[0].message.content
+    response = client.chat.completions.create(
+        messages=messages,
+        model=model,
+        temperature=temperature,
+    )
+    answer = response.choices[0].message.content
+    tokens = response.usage.total_tokens if response.usage else 0
+    return answer, tokens
